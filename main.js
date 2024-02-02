@@ -10,11 +10,17 @@ import axios from 'axios';
 import prompt from 'prompt-sync';
 
 dotenv.config();
-
+//For test, my wallet:        9bUe24UVqz9X4AqoRHNFu3idaDLtRGXTYD2CP45bzsgD
+//For test, use DLM token:    DLMnnSzTJWZUiL7RXUpAnNZVBgbGv7pFaMGWe8AbqCeG
 const solAddress = "So11111111111111111111111111111111111111112";
-// Solana gas price = 0.0001 ~ 0.0003
-const SOLANA_GAS_PRICE = 0.0003 * LAMPORTS_PER_SOL;
+// Solana gas fee
+const SOLANA_GAS_FEE_PRICE = 0.000005 * LAMPORTS_PER_SOL;  //Solana accounts require a minimum amount of SOL in order to exists on the blockchain, this is called rent-exempt account.
 let slipTarget = 5;
+
+// total holders: firststage * secondstage
+let firstStage = 2;  //How many holders do you want to add
+let secondStage = 2; // how many holders do you want to add
+
 const RPC_ENDPOINT = "https://api.mainnet-beta.solana.com";
 
 
@@ -38,20 +44,37 @@ function sleep(ms) {
 }
 
 async function sendSol(sourcePrvKey, targetAddress, amount) {
-    if (amount <= 0) {
-        console.log("Amount is less than 0.\n");
+    // Solana accounts require a minimum amount of SOL in order to exists on the blockchain, this is called rent-exempt account.
+    const rAmount = amount - SOLANA_GAS_FEE_PRICE;
+    if (rAmount < 0) {
+        console.log("Balance is less than Gas Fee");
         return;
     }
     const from = Keypair.fromSecretKey(bs58.decode(sourcePrvKey));
-    //consider lamports: amount * LAMPORTS_PER_SOL
-    console.log('Send sol amount', amount);
     const transferInstruction = web3.SystemProgram.transfer({
         fromPubkey: from.publicKey,
         toPubkey: new PublicKey(targetAddress),
-        lamports: 0,
+        lamports: rAmount
     });
-    const transaction = new Transaction().add(transferInstruction)
+    let transaction = new Transaction().add(transferInstruction)
 
+    // const blockhash = (await connection.getLatestBlockhash('finalized')).blockhash;
+    // transaction.recentBlockhash = blockhash;
+    // transaction.feePayer = from.publicKey;
+    // const gasFee = await transaction.getEstimatedFee(connection);
+
+    // console.log('send SOL  GAS Fee---', gasFee/LAMPORTS_PER_SOL);
+    // if (amount < gasFee) {
+    //     console.log('SOL Balance is less than Gas Fee.');
+    //     return;
+    // }
+    console.log('Send SOL amount - ', (amount - SOLANA_GAS_FEE_PRICE)/ LAMPORTS_PER_SOL);
+    // const transferInstruction1 = web3.SystemProgram.transfer({
+    //     fromPubkey: from.publicKey,
+    //     toPubkey: new PublicKey(targetAddress),
+    //     lamports: amount - gasFee,
+    // });
+    // const transaction1 = new Transaction().add(transferInstruction1)
     // Sign transaction, broadcast, and confirm
     try {
         const txid = await sendAndConfirmTransaction(
@@ -63,16 +86,21 @@ async function sendSol(sourcePrvKey, targetAddress, amount) {
     } catch (error) {
         console.log('error', error);
     }
-    sleep(0.6); // 0.6 second delay to avoid 429 too many requests
+    await sleep(1); // 1 second delay to avoid 429 too many requests
 
 }
 
 async function makeSwap(tokenAddress, amount, type, wallet) {
-    if (amount <= 0) {
-        console.log("amount is less than 0\n");
+    const rAmount = amount - SOLANA_GAS_FEE_PRICE;
+    if (rAmount < 0) {
+        console.log("amount is less than gas Fee");
         return;
     }
-    const fixedSwapValLamports = Math.floor(amount);
+    console.log("swap amount: ", rAmount/LAMPORTS_PER_SOL);
+    console.log("swap type: ", type);
+    console.log("swap wallet", wallet.publicKey.toString());
+
+    const fixedSwapValLamports = Math.floor(rAmount);
     const slipBPS = slipTarget * 100;
     let response;
     if (type == "buy") {
@@ -108,21 +136,23 @@ async function makeSwap(tokenAddress, amount, type, wallet) {
         maxRetries: 2
     });
     console.log(type + " Order::" + `https://solscan.io/tx/${txid}`);
-    sleep(0.6); // 0.6 second delay to avoid 429 too many requests
+    await sleep(1); // 1 second delay to avoid 429 too many requests
 
 }
 
-
 //split total amount into 10 parts - each part is greater than minAmount
-function split(totalAmount, minAmount, count = 10) {
-    const ratios = Array.from({ length: count }, () => parseInt(Math.random() * 1000));
+//Solana accounts require a minimum amount of SOL in order to exists on the blockchain, this is called rent-exempt account.
+function split(totalAmount, stage) {
+    const rMinAmount = (stage == 1 ? SOLANA_GAS_FEE_PRICE * firstStage : SOLANA_GAS_FEE_PRICE);
+    const splitCount = (stage == 1? firstStage : secondStage);
+    const ratios = Array.from({ length: splitCount }, () => parseInt(Math.random() * 1000));
     const total_ratio = ratios.reduce((a, b) => a + b, 0);
-    const shareProfit = totalAmount - minAmount * count;
-    if (shareProfit <= 0) {
-        console.log("=== TotalAmount and minAmount are incorrect!");
+    const shareProfit = totalAmount - rMinAmount * splitCount;
+    if (shareProfit < 0) {
+        console.log("=== TotalAmount and minAmount are incorrect! ===");
         process.exit(1);
     }
-    const parts = ratios.map(ratio => Math.floor(shareProfit * ratio / total_ratio) + minAmount);
+    const parts = ratios.map(ratio => Math.floor(shareProfit * ratio / total_ratio) + rMinAmount);
     let sum = 0;
     for (let i = 0; i < parts.length - 1; i = i + 1) {
         sum = sum + parts[i];
@@ -157,14 +187,12 @@ async function main() {
                     wallets[address] = pKey;
                 }
             });
-            Object.keys(wallets).forEach(x => {
+            for (const x of Object.keys(wallets)) {
                 //swap token to Sol
                 const tempWallet = new Wallet(Keypair.fromSecretKey(bs58.decode(wallets[x])));
-                const amount = getTokenBalance(new PublicKey(x), tokenAddress);
-                makeSwap(tokenAddress, amount, "sell", tempWallet); //token address to swap, amount, (Buy or Sell), wallet owner
-            });
-            console.log('Done');
-            process.exit();
+                const amount = getTokenBalance(new PublicKey(x), new PublicKey(tokenAddress));
+                await makeSwap(tokenAddress, amount, "sell", tempWallet); //token address to swap, amount, (Buy or Sell), wallet owner
+            };
         }
         else if (opt == 3) { //send SOL to target address from all wallets
             const fileName = prompt()("Please enter file name of wallet address: ");
@@ -183,16 +211,13 @@ async function main() {
                     wallets[address] = pKey;
                 }
             });
-            Object.keys(wallets).forEach(async (x) => {
+            for (const x of Object.keys(wallets)) {
                 const tempWallet = new Wallet(Keypair.fromSecretKey(bs58.decode(wallets[x])));
                 const amount = await connection.getBalance(tempWallet.publicKey);
                 // send all sol in the address to the target Address
-                if (amount > SOLANA_GAS_PRICE) { //amount > 0.0003 sol (average gas price)
-                    sendSol(wallets[x], targetAddress, amount - SOLANA_GAS_PRICE)
-                }
-            });
-            console.log('Done');
-            process.exit();
+                console.log("--wallet address: ", tempWallet.publicKey + ", balance: " + amount/LAMPORTS_PER_SOL);
+                await sendSol(wallets[x], targetAddress, amount); //
+            }
         } else if (opt == 1) {
             //read keypair and decode to public and private keys.
             const now = new Date();
@@ -239,8 +264,10 @@ async function main() {
             } else if (opt.toLowerCase() === 'n') {
                 bRideHolders = false;
             }
-            const firstStage = 10;
-            const secondStage = 10;
+            console.log("Total Holders = FirstStage * SecondStage\n");
+            firstStage = prompt()("Please input FirstStage number:");
+            secondStage = prompt()("Please input secondStage number:");
+
             console.log(`Generating first ${firstStage} wallets`);
             const first10Wallets = [];
             for (let x = 0; x < firstStage; x++) {
@@ -251,9 +278,7 @@ async function main() {
                 first10Wallets.push(_account);
             }
             const walletsToSwap = []; //
-            const rTotalBalance = solTotalBalance - SOLANA_GAS_PRICE * 11;
-            const _minToSend = rTotalBalance / 100;
-            const amountList = split(rTotalBalance, _minToSend);
+            const amountList = split(solTotalBalance, 1); //first stage, so stage = 1
             console.log(`First Stage...\n`);
             for (const x of first10Wallets) {
                 await sendSol(adminWallet_prv, x.publicKey.toString(), amountList[first10Wallets.indexOf(x)]);
@@ -270,22 +295,20 @@ async function main() {
                     second10Wallets.push(_account);
                     walletsToSwap.push(_account);
                 }
-                const fiBalance = await connection.getBalance(fi.publicKey) - (SOLANA_GAS_PRICE * 11);
-                const _minToSend2 = fiBalance / 100;
-                const amountList2 = split(fiBalance, _minToSend2);
+                const fiBalance = await connection.getBalance(fi.publicKey);
+                const amountList2 = split(fiBalance, 2); //second stage, so stage = 2
                 for (const y of second10Wallets) {
-                    const fiAmount = await connection.getBalance(fi.publicKey);
-                    sendSol(bs58.encode(fi.secretKey), y.publicKey.toString(), amountList2[second10Wallets.indexOf(y)]);
+                    await sendSol(bs58.encode(fi.secretKey), y.publicKey.toString(), amountList2[second10Wallets.indexOf(y)]);
                 }
             }
             console.log('First Buying!');
             for (const wal of walletsToSwap) {
                 const _balance = await connection.getBalance(wal.publicKey);
                 const _amount = parseInt((_balance * 30) / 100);
-                console.log(`wallet: ${wal.publicKey} balance: ${_balance}`);
+                console.log(`wallet: ${wal.publicKey}, balance: ${_balance/LAMPORTS_PER_SOL}`);
                 console.log('swapping 30% for Sol to Token');
                 const tempWallet = new Wallet(Keypair.fromSecretKey(wal.secretKey));
-                makeSwap(tokenAddress, _amount, "buy", tempWallet);
+                await makeSwap(tokenAddress, _amount, "buy", tempWallet);
             }
             console.log('Randomly buying or selling');
             while (true) {
@@ -299,48 +322,48 @@ async function main() {
                     if (buyOrSell == 0) { //sell
                         const _balance = await connection.getBalance(wal.publicKey);
                         if (_balance == 0) { //tokenBalance == 0 ? swap sol to token( 30% Sol to token)
-                            const _balance = await getTokenBalance(wal.publicKey, tokenAddress);
+                            const _balance = await getTokenBalance(wal.publicKey, new PublicKey(tokenAddress));
                             const _amount = parseInt((_balance * 30) / 100);
                             const tempWallet = new Wallet(Keypair.fromSecretKey(wal.secretKey));
-                            makeSwap(tokenAddress, _amount, "buy", tempWallet);
+                            await makeSwap(tokenAddress, _amount, "buy", tempWallet);
                         }
                         if (bRideHolders == true) { //swapTokenToSol (80% token to Sol) & sendSol(newWallet)
-                            const _balance = await getTokenBalance(wal.publicKey, tokenAddress);
+                            const _balance = await getTokenBalance(wal.publicKey, new PublicKey(tokenAddress));
                             const _amount = parseInt((_balance * 80) / 100);
                             const tempWallet = new Wallet(Keypair.fromSecretKey(wal.secretKey));
-                            makeSwap(tokenAddress, _amount, "sell", tempWallet);
+                            await makeSwap(tokenAddress, _amount, "sell", tempWallet);
                             //
                             const balanceSol = await connection.getBalance(wal.publicKey);
-                            if (balanceSol > SOLANA_GAS_PRICE) {
+                            if (balanceSol > SOLANA_GAS_FEE_PRICE) {
                                 const newWallet = Keypair.generate();
                                 const _account_prv = bs58.encode(newWallet.secretKey);
                                 const _account_pub = newWallet.publicKey;
                                 await fs.appendFile(fileName, _account_pub + " , " + _account_prv + "\n");
                                 walletsToAdd.push(newWallet);
                                 walletsToRemove.push(wal);
-                                sendSol(bs58.encode(wal.secretKey), newWallet.publicKey.toString(), balanceSol - SOLANA_GAS_PRICE);
+                                await sendSol(bs58.encode(wal.secretKey), newWallet.publicKey.toString(), balanceSol);
                             }
                         } else if (bRideHolders == false) { //swapTokenToSOL(100% token to SOL) & sendSOL(new Wallet)
-                            const _balance = await getTokenBalance(wal.publicKey, tokenAddress);
+                            const _balance = await getTokenBalance(wal.publicKey, new PublicKey(tokenAddress));
                             const tempWallet = new Wallet(Keypair.fromSecretKey(wal.secretKey));
                             makeSwap(tokenAddress, _balance, "sell", tempWallet);
                             //
                             const balanceSol = await connection.getBalance(wal.publicKey);
-                            if (balanceSol > SOLANA_GAS_PRICE) {
+                            if (balanceSol > SOLANA_GAS_FEE_PRICE) {  
                                 const newWallet = Keypair.generate();
                                 const _account_prv = bs58.encode(newWallet.secretKey);
                                 const _account_pub = newWallet.publicKey;
                                 await fs.appendFile(fileName, _account_pub + " , " + _account_prv + "\n");
                                 walletsToAdd.push(newWallet);
                                 walletsToRemove.push(wal);
-                                sendSol(bs58.encode(wal.secretKey), newWallet.publicKey.toString(), balanceSol - SOLANA_GAS_PRICE);
+                                await sendSol(bs58.encode(wal.secretKey), newWallet.publicKey.toString(), balanceSol);
                             }
                         }
                     } else { //buy 30% Sol to token
                         const _balance = await connection.getBalance(wal.publicKey);
                         const _amount = parseInt((_balance * 30) / 100);
                         const tempWallet = new Wallet(Keypair.fromSecretKey(wal.secretKey));
-                        makeSwap(tokenAddress, _amount, "buy", tempWallet);
+                        await makeSwap(tokenAddress, _amount, "buy", tempWallet);
                     }
                 }
                 walletsToAdd.forEach(x => walletsToSwap.push(x));
